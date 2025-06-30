@@ -1,140 +1,182 @@
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import StandardScaler
-from sklearn.neural_network import MLPClassifier
-from sklearn.model_selection import cross_val_score, cross_val_predict, StratifiedKFold
-from sklearn.pipeline import Pipeline, FunctionTransformer
-from sklearn.metrics import confusion_matrix, accuracy_score
-from scipy.stats import friedmanchisquare, rankdata
 import matplotlib.pyplot as plt
+import seaborn as sns
 
-# 1) Carrega o CSV e descarta a primeira coluna
-df = pd.read_csv('D:\\Collective_cog_prediction_MLP\\data\\pre_processado\\cog_coletivo_full_data.csv')
-df = df.iloc[:, 1:]
+from sklearn.base import clone
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline, FunctionTransformer
+from sklearn.model_selection import (
+    StratifiedKFold, GridSearchCV, RandomizedSearchCV, cross_val_score
+)
+from sklearn.neural_network import MLPClassifier
+from skopt import BayesSearchCV
+from skopt.space import Real, Categorical as SkoptCategorical
+from sklearn_genetic import GASearchCV
+from sklearn_genetic.space import Categorical, Continuous
+from scipy.stats import friedmanchisquare
+import scikit_posthocs as sp
+from sklearn.metrics import confusion_matrix, accuracy_score
 
-# 2) Separa X e y (supondo que o alvo seja 'resultado')
+# ─── 0) Wrapper que converte strings em tuplas ────────────────────────────────
+class MLPWrapper(MLPClassifier):
+    def set_params(self, **params):
+        # Se vier string para hidden_layer_sizes, avalia para tupla
+        hls_key = 'hidden_layer_sizes'
+        if hls_key in params and isinstance(params[hls_key], str):
+            params[hls_key] = eval(params[hls_key])
+        return super().set_params(**params)
+
+# ─── 1) Load and preprocess data ─────────────────────────────────────────────
+df = pd.read_csv(
+    'D:\\Collective_cog_prediction_MLP\\data\\pre_processado\\cog_coletivo_full_data.csv'
+).iloc[:, 1:]
 y = df['resultado'].values
 X = df.drop(columns=['resultado', 'PCT_1', 'PCT_2'], errors='ignore')
-colunas_originais = X.columns.tolist()
+feature_cols = X.columns.tolist()
 
-# 3) Transformer para recalcular PCT1 e PCT2 após cada normalização de fold
+# ─── 2) Transformer to recalc PCT1/PCT2 after scaling ────────────────────────
 def add_pct(X_arr):
-    X_df = pd.DataFrame(X_arr, columns=colunas_originais)
+    X_df = pd.DataFrame(X_arr, columns=feature_cols)
     X_df['PCT1'] = X_df.filter(regex='_1$').mean(axis=1)
     X_df['PCT2'] = X_df.filter(regex='_2$').mean(axis=1)
     return X_df.values
 
 pct_transformer = FunctionTransformer(add_pct, validate=False)
 
-# 4) Grade de hiperparâmetros
-param_grid = {
-    'hidden_layer_sizes': [(50,), (100,), (50, 50)],
-    'alpha': [1e-4, 1e-3],
-    'learning_rate_init': [1e-3, 1e-2]
-}
-configs = [
-    {'hidden_layer_sizes': hl, 'alpha': a, 'learning_rate_init': lr}
-    for hl in param_grid['hidden_layer_sizes']
-    for a in param_grid['alpha']
-    for lr in param_grid['learning_rate_init']
-]
-
-# 5) Stratified 5-fold CV
-cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-long_names = [
-    f"HL{cfg['hidden_layer_sizes']}_A{cfg['alpha']}_L{cfg['learning_rate_init']}"
-    for cfg in configs
-]
-
-# 6) Abreviações para os gráficos
-short_names = []
-for name in long_names:
-    s = (name
-         .replace("HL(50,)","50")
-         .replace("HL(100,)","100")
-         .replace("HL(50, 50)","50-50")
-         .replace("_A"," A")
-         .replace("_L"," L"))
-    short_names.append(s)
-
-# 7) DataFrame para resultados
-results = pd.DataFrame(index=range(1, 6), columns=long_names)
-
-# 8) Loop de avaliação sem vazamento
-for cfg, long_name in zip(configs, long_names):
-    pipe = Pipeline([
-        ('scaler', StandardScaler()),
-        ('pct',    pct_transformer),
-        ('mlp',    MLPClassifier(random_state=42, max_iter=500, **cfg))
-    ])
-    scores = cross_val_score(pipe, X.values, y, cv=cv, scoring='accuracy')
-    results[long_name] = scores
-
-# 9) Friedman test
-stat, p_value = friedmanchisquare(*[results[col] for col in results.columns])
-print(f"Friedman χ² = {stat:.3f}, p-value = {p_value:.3f}")
-
-# 10) Nemenyi post-hoc (aprox.)
-def nemenyi_posthoc(data, q_crit=3.0):
-    n_folds, k = data.shape
-    ranks = np.apply_along_axis(lambda row: rankdata(-row), 1, data)
-    avg_ranks = ranks.mean(axis=0)
-    se = np.sqrt(k * (k + 1) / (6 * n_folds))
-    cd = q_crit * se
-    return avg_ranks, cd
-
-avg_ranks, cd = nemenyi_posthoc(results.values)
-
-# 11) Gráficos
-# Usa cópia para plot com nomes curtos
-plot_df = results.copy()
-plot_df.columns = short_names
-
-plt.figure(figsize=(10, 6))
-plot_df.boxplot()
-plt.title('MLP: 5-fold CV (Accuracy)')
-plt.ylabel('Accuracy')
-plt.xticks(rotation=45, ha='right')
-plt.tight_layout()
-
-plt.figure(figsize=(10, 6))
-y_pos = np.arange(len(avg_ranks))
-plt.hlines(y_pos, [0], avg_ranks)
-plt.plot(avg_ranks, y_pos, 'o')
-plt.yticks(y_pos, short_names)
-plt.xlabel('Average Rank (lower = better)')
-plt.title('Critical Difference Diagram (approx.)')
-max_r = avg_ranks.max()
-plt.hlines(-1, max_r - cd, max_r, linewidth=4)
-plt.text(max_r - cd/2, -1.3, f'CD = {cd:.2f}', ha='center')
-plt.ylim(-2, len(avg_ranks))
-plt.tight_layout()
-
-# 12) Matriz de Confusão para a melhor configuração
-best_name = results.mean().idxmax()
-best_cfg = configs[long_names.index(best_name)]
-
-best_pipe = Pipeline([
+# ─── 3) Define base pipeline usando o wrapper ────────────────────────────────
+base_pipe = Pipeline([
     ('scaler', StandardScaler()),
-    ('pct',    pct_transformer),
-    ('mlp',    MLPClassifier(random_state=42, max_iter=500, **best_cfg))
+    ('pct', pct_transformer),
+    ('mlp', MLPWrapper(random_state=42, max_iter=500))
 ])
-y_pred = cross_val_predict(best_pipe, X.values, y, cv=cv)
-acc = accuracy_score(y, y_pred)
-cm = confusion_matrix(y, y_pred)
 
-plt.figure(figsize=(6, 5))
-plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
-plt.title(f'Confusion Matrix ({best_name}) – Acc: {acc:.3f}')
-plt.colorbar()
-ticks = np.unique(y)
-plt.xticks(ticks, ticks)
-plt.yticks(ticks, ticks)
-plt.xlabel('Predicted')
-plt.ylabel('True')
-for i in range(cm.shape[0]):
-    for j in range(cm.shape[1]):
-        plt.text(j, i, cm[i, j], ha='center', va='center')
+# ─── 4) Define search spaces ─────────────────────────────────────────────────
+param_grid = {
+    'mlp__hidden_layer_sizes': [(50,), (100,), (50, 50)],
+    'mlp__alpha': [1e-4, 1e-3],
+    'mlp__learning_rate_init': [1e-3, 1e-2]
+}
+param_dist = param_grid
+
+# Para BayesSearchCV, usamos strings nas categorias
+bayes_space = {
+    'mlp__hidden_layer_sizes': SkoptCategorical(["(50,)", "(100,)", "(50,50)"]),
+    'mlp__alpha': Real(1e-4, 1e-3, prior='log-uniform'),
+    'mlp__learning_rate_init': Real(1e-3, 1e-2, prior='log-uniform')
+}
+
+# GeneticSearchCV aceita instâncias diretas
+genetic_params = {
+    'mlp__hidden_layer_sizes': Categorical([(50,), (100,), (50, 50)]),
+    'mlp__alpha': Continuous(1e-4, 1e-3),
+    'mlp__learning_rate_init': Continuous(1e-3, 1e-2)
+}
+
+# ─── 5) CV splitter ───────────────────────────────────────────────────────────
+cv_splitter = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+# ─── 6) Setup search objects ─────────────────────────────────────────────────
+searches = {
+    'GridSearch': GridSearchCV(
+        clone(base_pipe), param_grid, scoring='accuracy',
+        cv=cv_splitter, n_jobs=-1, verbose=1
+    ),
+    'RandomizedSearch': RandomizedSearchCV(
+        clone(base_pipe), param_dist, n_iter=10, scoring='accuracy',
+        cv=cv_splitter, random_state=42, n_jobs=-1, verbose=1
+    ),
+    'BayesSearch': BayesSearchCV(
+        clone(base_pipe), bayes_space, n_iter=20, scoring='accuracy',
+        cv=cv_splitter, random_state=42, n_jobs=-1, verbose=1
+    ),
+    'GeneticSearch': GASearchCV(
+        estimator=clone(base_pipe),
+        param_grid=genetic_params,
+        scoring='accuracy',
+        cv=cv_splitter,
+        population_size=20,
+        generations=10,
+        n_jobs=-1,
+        verbose=True
+    )
+}
+
+# ─── 7) Fit searches and collect results ─────────────────────────────────────
+results = []
+cv_scores = {}
+
+for name, search in searches.items():
+    print(f"\nRunning {name}...")
+    search.fit(X.values, y)
+
+    # 7a) Ajuste do best_params: Bayes vem em string, wrapper já sabe converter
+    best_params = search.best_params_.copy()
+
+    # 7b) Clone e configura o pipeline com os best_params
+    model = clone(base_pipe).set_params(**best_params)
+
+    # 7c) Avalia com cross_val_score
+    scores = cross_val_score(model, X.values, y, scoring='accuracy', cv=cv_splitter)
+    cv_scores[name] = scores
+
+    results.append({
+        'Strategy': name,
+        'Best Score': np.mean(scores),
+        'Std Dev': np.std(scores),
+        'Best Params': best_params
+    })
+
+# ─── 8) Summary DataFrame ────────────────────────────────────────────────────
+summary_df = pd.DataFrame(results).sort_values('Best Score', ascending=False)
+summary_df.to_csv('search_comparison_summary.csv', index=False)
+
+# ─── 9) Salvar melhores hiperparâmetros ──────────────────────────────────────
+params_df = (
+    pd.DataFrame.from_dict(
+        {r['Strategy']: r['Best Params'] for r in results},
+        orient='index', columns=['Best Params']
+    )
+    .reset_index()
+    .rename(columns={'index': 'Strategy'})
+)
+params_df.to_csv('search_best_params.csv', index=False)
+
+# ─── 10) Friedman test + post hoc ─────────────────────────────────────────────
+scores_df = pd.DataFrame(cv_scores)
+friedman_stat, friedman_p = friedmanchisquare(*[scores_df[col] for col in scores_df.columns])
+posthoc = sp.posthoc_nemenyi_friedman(scores_df.T.values)
+
+# ─── 11) Save stats ──────────────────────────────────────────────────────────
+with open('friedman_test_results.txt', 'w') as f:
+    f.write(f"Friedman χ² = {friedman_stat:.3f}, p = {friedman_p:.4f}\n\n")
+    f.write("Post hoc de Nemenyi:\n")
+    f.write(posthoc.to_string())
+
+# ─── 12) Print to console ────────────────────────────────────────────────────
+print("\n=== Friedman Test ===")
+print(f"χ² = {friedman_stat:.3f}, p = {friedman_p:.4f}\n")
+print("=== Post-hoc de Nemenyi (p-values) ===")
+print(posthoc, "\n")
+print("=== Resumo dos Métodos ===")
+print(summary_df[['Strategy', 'Best Score', 'Std Dev']], "\n")
+
+# ─── 13) Plot boxplot of CV accuracies ────────────────────────────────────────
+plt.figure(figsize=(8, 5))
+sns.boxplot(data=scores_df)
+plt.ylabel('CV Accuracy')
+plt.title('Comparison of CV Accuracy by Search Strategy')
+plt.ylim(0, 1)
+plt.grid(axis='y', linestyle='--', alpha=0.5)
 plt.tight_layout()
-
+plt.savefig('search_strategy_accuracy_boxplot.png')
 plt.show()
+
+# ─── 14) Plot heatmap of post-hoc p-values ────────────────────────────────────
+plt.figure(figsize=(6, 5))
+sns.heatmap(posthoc, annot=True, fmt=".3f")
+plt.title("Nemenyi post-hoc p-values")
+plt.tight_layout()
+plt.savefig('posthoc_nemenyi_heatmap.png')
+plt.show()
+

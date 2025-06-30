@@ -1,0 +1,5 @@
+Strategy,Best Score,Std Dev,Best Params
+GeneticSearch,0.566969696969697,0.029820399030648592,"{'mlp__hidden_layer_sizes': (50,), 'mlp__alpha': 0.0006997612477593877, 'mlp__learning_rate_init': 0.002295447783571392}"
+BayesSearch,0.5406060606060605,0.0658920408303715,"OrderedDict({'mlp__alpha': 0.0001046776013250969, 'mlp__hidden_layer_sizes': '(100,)', 'mlp__learning_rate_init': 0.0010078415175197057})"
+GridSearch,0.5316161616161617,0.06518995029470868,"{'mlp__alpha': 0.001, 'mlp__hidden_layer_sizes': (100,), 'mlp__learning_rate_init': 0.001}"
+RandomizedSearch,0.5316161616161617,0.06518995029470868,"{'mlp__learning_rate_init': 0.001, 'mlp__hidden_layer_sizes': (100,), 'mlp__alpha': 0.001}"
